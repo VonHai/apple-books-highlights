@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "apple-books-highlights"
+version = "0.1.0"
+description = "Export your macOS Apple Books underlines, highlights and notes to Markdown."
+readme = "README.md"
+requires-python = ">=3.8"
+license = { text = "MIT" }
+keywords = ["apple-books", "ibooks", "highlights", "annotations", "markdown", "obsidian", "macos"]
+authors = [{ name = "Hai", email = "" }]
+classifiers = [
+    "Environment :: MacOS X",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: MacOS :: MacOS X",
+    "Programming Language :: Python :: 3",
+    "Topic :: Text Processing :: Markup :: Markdown",
+]
+dependencies = []
+
+[project.urls]
+Homepage = "https://github.com/VonHai/apple-books-highlights"
+Issues = "https://github.com/VonHai/apple-books-highlights/issues"
+
+[project.scripts]
+apple-books-highlights = "apple_books_highlights:main"
+
+[tool.setuptools]
+py-modules = ["apple_books_highlights"]
