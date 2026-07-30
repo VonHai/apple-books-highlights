@@ -1,43 +1,41 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Export your Apple Books (macOS) underlines / highlights / notes to Markdown.
+"""把 macOS「图书」(Apple Books) 里的下划线 / 高亮 / 批注导出成 Markdown。
 
-Why this exists
----------------
-Underlines and highlights you make in the macOS **Books** app are *not* written
-into the ``.epub`` file. They live in Apple Books' own SQLite databases:
+为什么需要它
+-----------
+你在 macOS「图书」App 里画的下划线和高亮**不会写进 `.epub` 文件**,
+而是存在 Apple Books 自己的 SQLite 数据库里:
 
     ~/Library/Containers/com.apple.iBooksX/Data/Documents/
-        AEAnnotation/AEAnnotation_*.sqlite   <- the annotations (underline/highlight/note)
-        BKLibrary/BKLibrary-*.sqlite         <- the book title / author table
+        AEAnnotation/AEAnnotation_*.sqlite   ← 标注内容(下划线/高亮/批注)
+        BKLibrary/BKLibrary-*.sqlite         ← 书名 / 作者对照表
 
-So to export your highlights you have to read those two databases, not the EPUB.
+所以想导出划线,只能直接读这两个库,而不是解析 EPUB。
 
-This tool copies both databases (together with their ``-wal`` / ``-shm``
-write-ahead logs) into a temp dir and queries them read-only, so it (a) sees
-annotations Books hasn't flushed to disk yet and (b) never locks the running app.
+本工具把两个库(连同 `-wal` / `-shm` 预写日志)复制到临时目录后**只读**查询,
+既能拿到「图书」尚未落盘、还在 WAL 里的最新标注,也不会锁住正在运行的 App。
 
-Output is Obsidian-friendly Markdown (callout blocks), grouped by chapter and
-ordered by reading position.
+输出是对 Obsidian 友好的 Markdown(callout 引用块),按章节分组、按阅读顺序排列。
 
-Usage
------
-    # List every book that has annotations (title + count)
+用法
+----
+    # 列出所有有标注的书(书名 + 条数)
     apple-books-highlights --list
 
-    # Export one book (fuzzy, case-insensitive title match)
-    apple-books-highlights --book "Sapiens"
+    # 导出某本书(按书名片段模糊匹配,不区分大小写)
+    apple-books-highlights --book "活着"
 
-    # Preview to screen without writing a file
-    apple-books-highlights --book "Sapiens" --stdout
+    # 先预览不写文件(打印到屏幕)
+    apple-books-highlights --book "活着" --stdout
 
-    # Export every annotated book, one note per book
+    # 导出所有有标注的书,每本一篇
     apple-books-highlights --all
 
-    # Choose output dir and output language (en | zh)
+    # 指定输出目录和语言(en | zh)
     apple-books-highlights --all --out ~/notes --lang zh
 
-Requirements: macOS + Python 3.8+ (``sqlite3`` is in the stdlib). No pip deps.
+依赖:macOS + Python 3.8+(`sqlite3` 为标准库自带)。无需 pip 安装任何依赖。
 
 MIT License. https://github.com/VonHai/apple-books-highlights
 """
@@ -61,21 +59,20 @@ BOOKS_ROOT = os.path.join(HOME, "Library/Containers/com.apple.iBooksX/Data/Docum
 ANNOT_GLOB = os.path.join(BOOKS_ROOT, "AEAnnotation", "AEAnnotation*.sqlite")
 LIB_GLOB = os.path.join(BOOKS_ROOT, "BKLibrary", "BKLibrary*.sqlite")
 
-# Apple Books stores timestamps as Core Data / "Cocoa" seconds, whose epoch is
-# 2001-01-01 UTC rather than the Unix 1970 epoch.
+# Apple Books 的时间戳用 Core Data / "Cocoa" 秒数,基准是 2001-01-01 UTC,
+# 而不是 Unix 的 1970 基准。
 COCOA_EPOCH = 978307200
 
-# The column that holds the chapter/section title is undocumented and its name
-# has drifted across macOS releases. We probe for these in order and use the
-# first one that actually exists on this machine (see `_pick_chapter_column`).
+# 存章节/小节标题的那一列是未文档化的,列名在不同 macOS 版本会变。
+# 我们按顺序探测下列候选,取本机真实存在的第一个(见 `_pick_chapter_column`)。
 CHAPTER_COLUMN_CANDIDATES = ("ZFUTUREPROOFING5", "ZPLLOCATIONRANGESTART")
 
 
 class BooksExportError(Exception):
-    """Raised for any user-facing failure (missing DB, no match, etc.).
+    """所有面向用户的失败(找不到库、无匹配等)都抛这个异常。
 
-    Raising instead of calling ``sys.exit`` deep inside helpers keeps the core
-    importable and testable; the CLI boundary (`main`) turns it into exit code 1.
+    不在底层 helper 里直接 `sys.exit`,而是抛异常——这样核心逻辑可导入、可测试;
+    只在 CLI 边界(`main`)把它转成退出码 1。
     """
 
 
@@ -99,14 +96,14 @@ class Annotation:
 class ExportResult:
     book: Book
     count: int
-    path: Optional[str] = None  # None when printed to stdout
+    path: Optional[str] = None  # 打印到 stdout 时为 None
 
 
 # --------------------------------------------------------------------------- #
-# Database access
+# 数据库读取
 # --------------------------------------------------------------------------- #
 def _find_one(pattern: str, what: str) -> str:
-    """Return the most recently modified file matching *pattern*."""
+    """返回匹配 *pattern* 的、最近修改的那个文件。"""
     hits = sorted(glob.glob(pattern))
     if not hits:
         raise BooksExportError(
@@ -117,7 +114,7 @@ def _find_one(pattern: str, what: str) -> str:
 
 
 def _copy_db(src: str, tmpdir: str) -> str:
-    """Copy the .sqlite plus its -wal / -shm siblings so we read the latest data."""
+    """把 .sqlite 连同 -wal / -shm 兄弟文件一起复制过来,以读到最新数据。"""
     for suffix in ("", "-wal", "-shm"):
         p = src + suffix
         if os.path.exists(p):
@@ -136,7 +133,7 @@ def _table_columns(con: sqlite3.Connection, table: str) -> set:
 
 
 def _pick_chapter_column(columns: set) -> Optional[str]:
-    """Chapter title lives in a version-dependent column; pick one that exists."""
+    """章节标题所在的列因版本而异,挑一个本机真实存在的候选列。"""
     for candidate in CHAPTER_COLUMN_CANDIDATES:
         if candidate in columns:
             return candidate
@@ -144,7 +141,7 @@ def _pick_chapter_column(columns: set) -> Optional[str]:
 
 
 def load_library(tmpdir: str) -> Dict[str, Book]:
-    """Return ``{asset_id: Book}`` for every asset in the library."""
+    """返回书库里每本书的 ``{asset_id: Book}``。"""
     con = _connect(_find_one(LIB_GLOB, "the BKLibrary database"), tmpdir)
     try:
         books: Dict[str, Book] = {}
@@ -163,16 +160,16 @@ def load_library(tmpdir: str) -> Dict[str, Book]:
 
 
 def _cfi_sort_key(cfi: str):
-    """Turn an ``epubcfi`` string into a numeric tuple so annotations sort by
-    reading order, not lexicographically (which would put /6/14 before /6/2)."""
+    """把 ``epubcfi`` 位置串解析成数值元组,使标注按阅读顺序排列,
+    而不是按字符串字典序(那会把 /6/14 排到 /6/2 前面)。"""
     if not cfi:
         return (10 ** 9,)
     return tuple(int(n) for n in re.findall(r"\d+", cfi)) or (10 ** 9,)
 
 
 def load_annotations(asset_ids: Sequence[str], tmpdir: str) -> Dict[str, List[Annotation]]:
-    """Return ``{asset_id: [Annotation, ...]}`` for the given assets, each list
-    ordered by reading position. Assets with no annotations are simply absent."""
+    """返回给定这些书的 ``{asset_id: [Annotation, ...]}``,每本按阅读顺序排好。
+    没有任何标注的书不会出现在结果里。"""
     if not asset_ids:
         return {}
     con = _connect(_find_one(ANNOT_GLOB, "the AEAnnotation database"), tmpdir)
@@ -221,7 +218,7 @@ def load_annotations(asset_ids: Sequence[str], tmpdir: str) -> Dict[str, List[An
 
 
 # --------------------------------------------------------------------------- #
-# Rendering
+# 渲染
 # --------------------------------------------------------------------------- #
 LABELS = {
     "en": {
@@ -243,7 +240,7 @@ LABELS = {
         "heading_suffix": "划线摘录",
         "info": "导出信息",
         "author": "作者",
-        "source_line": "来源：macOS「图书」(Apple Books) 标注数据库",
+        "source_line": "来源:macOS「图书」(Apple Books) 标注数据库",
         "exported": "导出时间",
         "summary": "共 {n} 条 — 下划线 {u} / 高亮 {h} / 含批注 {c}",
         "underline": "下划线",
@@ -254,7 +251,7 @@ LABELS = {
 
 
 def render_markdown(book: Book, annotations: List[Annotation], lang: str = "en") -> str:
-    """Render one book's annotations as Obsidian-flavoured Markdown."""
+    """把一本书的标注渲染成对 Obsidian 友好的 Markdown。"""
     t = LABELS.get(lang, LABELS["en"])
     n_under = sum(1 for a in annotations if a.is_underline)
     n_high = len(annotations) - n_under
@@ -293,8 +290,7 @@ def render_markdown(book: Book, annotations: List[Annotation], lang: str = "en")
             out += [f"## {a.chapter}", ""]
             last_chapter = a.chapter
 
-        # Collapse blank lines inside a multi-line selection so the quote block
-        # stays a single tidy callout.
+        # 把多行划线里的空行压成段内换行,让引用块保持成一个整洁的 callout。
         text = re.sub(r"\n{2,}", "\n> \n> ", a.text.strip()).replace("\n", "\n> ")
         kind = t["underline"] if a.is_underline else t["highlight"]
         out += [f"> [!quote] {i}. {kind}", f"> {text}"]
@@ -306,7 +302,7 @@ def render_markdown(book: Book, annotations: List[Annotation], lang: str = "en")
 
 
 # --------------------------------------------------------------------------- #
-# Output
+# 写出
 # --------------------------------------------------------------------------- #
 def _safe_filename(name: str) -> str:
     name = re.sub(r'[\\/:*?"<>|]', "_", name).strip()
@@ -314,11 +310,11 @@ def _safe_filename(name: str) -> str:
 
 
 def _unique_path(out_dir: str, book: Book) -> str:
-    """Pick a path that won't clobber a same-titled book already exported."""
+    """挑一个不会覆盖已导出的同名书的路径。"""
     base = _safe_filename(book.title)
     path = os.path.join(out_dir, base + ".md")
     if os.path.exists(path):
-        # Disambiguate with a short slice of the asset id rather than overwrite.
+        # 用 asset id 的短前缀区分,而不是静默覆盖。
         path = os.path.join(out_dir, f"{base} ({book.asset_id[:8]}).md")
     return path
 
@@ -338,11 +334,11 @@ def export_book(
 
 
 # --------------------------------------------------------------------------- #
-# CLI
+# 命令行
 # --------------------------------------------------------------------------- #
 def _resolve_targets(args, library: Dict[str, Book], tmpdir: str) -> List[str]:
-    """Turn the CLI selector (--book / --asset / --all) into a list of asset ids
-    that actually have annotations, loading only what's needed."""
+    """把命令行选择器(--book / --asset / --all)解析成一批「确实有标注」的
+    asset id;只加载需要的部分,不做无谓的全库扫描。"""
     if args.asset:
         candidates = [args.asset] if args.asset in library else []
     elif args.book:
